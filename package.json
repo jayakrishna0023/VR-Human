@@ -1,0 +1,17 @@
+{
+    "name": "vr-ai-assistant",
+    "version": "1.0.0",
+    "description": "Browser-based AI virtual assistant with 3D avatar, lip sync, and facial emotions",
+    "main": "server.js",
+    "type": "module",
+    "scripts": {
+        "start": "node server.js",
+        "dev": "node --watch server.js"
+    },
+    "dependencies": {
+        "@google/generative-ai": "^0.21.0",
+        "cors": "^2.8.5",
+        "dotenv": "^16.4.7",
+        "express": "^4.21.2"
+    }
+}
