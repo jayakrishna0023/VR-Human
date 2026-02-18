@@ -15,7 +15,9 @@ We take the security of VR-Human seriously. If you discover a security vulnerabi
 ### How to Report
 
 1. **Do NOT** open a public issue
-2. Email the project maintainers with details of the vulnerability
+2. Contact the project maintainers privately through one of these methods:
+   - Open a [GitHub Security Advisory](https://github.com/jayakrishna0023/VR-Human/security/advisories/new) (preferred)
+   - Or email the repository owner through their GitHub profile
 3. Include steps to reproduce the vulnerability
 4. Allow reasonable time for the issue to be addressed before public disclosure
 
