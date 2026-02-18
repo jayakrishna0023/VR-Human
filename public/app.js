@@ -1,546 +1,483 @@
 /**
  * ═══════════════════════════════════════════════════════════════════════════
- * Nova AI Virtual Human — Advanced Frontend (v4.0)
+ * Nova AI Virtual Human — GLB Avatar with Morph-Target Lip Sync (v7.0)
  * ═══════════════════════════════════════════════════════════════════════════
  *
- * Procedural humanoid avatar with real-time lip sync synchronized to
- * Web Speech API boundary events for accurate mouth animation.
- *
- * v4.0 Improvements:
- * - Robust WebGL2/WebGL1 fallback with clear diagnostics
- * - Real-time SpeechSynthesis boundary-event lip sync
- * - Tongue mesh for improved articulation visuals
- * - Cheek deformation for realistic wide/round shapes
- * - Chin mesh moving with jaw for natural look
- * - Enhanced co-articulation blending between visemes
- * - Pupil dilation tied to emotion
- * - Better idle micro-movements
+ * Uses a pre-made Ready Player Me GLB avatar loaded via GLTFLoader.
+ * Lip sync driven entirely through morph-target blend shapes (visemes).
+ * Supports ARKit + Oculus Viseme blend shapes, emotion expressions,
+ * realistic eye gaze/blink, idle body animation, face tracking.
  */
 
-// ─── Error overlay helper ────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────
 function showError(title, msg) {
     const d = document.createElement('div');
     d.style.cssText = `position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
-        background:rgba(20,20,40,.95);color:#fff;padding:24px;border-radius:14px;
-        border:2px solid #ff6b6b;max-width:520px;font-family:monospace;z-index:9999;text-align:center`;
-    d.innerHTML = `<h3 style="color:#ff6b6b;margin:0 0 10px">${title}</h3>
-        <p style="margin:0;line-height:1.5">${msg}</p>
-        <button onclick="this.parentElement.remove()" style="margin-top:16px;padding:8px 16px;
-        background:#ff6b6b;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px">Close</button>`;
+        background:rgba(10,10,25,.97);color:#fff;padding:28px 32px;border-radius:16px;
+        border:2px solid #ff6b6b;max-width:520px;font-family:system-ui,sans-serif;z-index:9999;text-align:center`;
+    d.innerHTML = `<h3 style="color:#ff6b6b;margin:0 0 12px;font-size:18px">${title}</h3>
+        <p style="margin:0;line-height:1.6;font-size:14px">${msg}</p>
+        <button onclick="this.parentElement.remove()" style="margin-top:18px;padding:10px 24px;
+        background:#ff6b6b;color:#fff;border:none;border-radius:10px;cursor:pointer;font-size:14px;font-weight:600">Close</button>`;
     document.body.appendChild(d);
 }
 
+function showNotification(msg, type = 'info') {
+    const colors = { info: '#7c6fff', success: '#4ade80', warning: '#fbbf24', error: '#ff6b6b' };
+    const d = document.createElement('div');
+    d.style.cssText = `position:fixed;top:20px;right:20px;background:rgba(10,10,25,.95);color:#fff;
+        padding:14px 22px;border-radius:12px;border-left:4px solid ${colors[type]};
+        font-family:system-ui,sans-serif;font-size:14px;z-index:9999;max-width:320px;
+        animation:notifSlide 0.3s ease;box-shadow:0 8px 32px rgba(0,0,0,0.4)`;
+    d.innerHTML = msg;
+    document.body.appendChild(d);
+    setTimeout(() => { d.style.opacity = '0'; d.style.transition = 'opacity 0.3s'; setTimeout(() => d.remove(), 300); }, 3500);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
-// Dynamic imports with error handling
+// Dynamic imports
 // ═══════════════════════════════════════════════════════════════════════════
-let THREE, OrbitControls;
+let THREE, OrbitControls, GLTFLoader;
 try {
     THREE = await import('three');
-} catch (e) {
-    showError('Three.js Load Error', `Cannot load Three.js: ${e.message}<br>Check your internet connection.`);
-    throw e;
-}
-try {
     ({ OrbitControls } = await import('three/addons/controls/OrbitControls.js'));
+    ({ GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js'));
 } catch (e) {
-    showError('OrbitControls Error', `Cannot load OrbitControls: ${e.message}`);
+    showError('Load Error', `Cannot load Three.js modules: ${e.message}`);
     throw e;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SECTION 1 — Scene, Camera, Renderer
+// SECTION 1 — Scene, Camera, Renderer, Lighting
 // ═══════════════════════════════════════════════════════════════════════════
 const canvas = document.getElementById('avatar-canvas');
 if (!canvas) { showError('Missing Canvas', '#avatar-canvas not found'); throw new Error('no canvas'); }
 
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(28, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
-camera.position.set(0, 1.58, 2.8);
+function getCanvasDimensions() {
+    const parent = canvas.parentElement;
+    let w = canvas.clientWidth || parent?.clientWidth || window.innerWidth * 0.65;
+    let h = canvas.clientHeight || parent?.clientHeight || window.innerHeight;
+    return { width: Math.max(w, 400), height: Math.max(h, 300) };
+}
 
-// Robust WebGL context — do NOT pre-test the main canvas (that steals the context)
+const initDims = getCanvasDimensions();
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x080818);
+scene.fog = new THREE.FogExp2(0x080818, 0.035);
+
+const camera = new THREE.PerspectiveCamera(28, initDims.width / initDims.height, 0.1, 100);
+camera.position.set(0, 1.55, 2.6);
+
 let renderer;
 try {
-    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
 } catch (e) {
-    try {
-        renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: true });
-    } catch (e2) {
-        showError('WebGL Error',
-            `Could not create WebGL renderer.<br><br>
-            <b>Fixes:</b><br>
-            1. Go to <b>chrome://settings</b> &rarr; System &rarr; enable <b>Use hardware acceleration</b><br>
-            2. Go to <b>chrome://flags/#enable-webgl</b> &rarr; set to Enabled<br>
-            3. Update your GPU drivers<br>
-            4. Try a different browser`);
-        throw e2;
-    }
+    try { renderer = new THREE.WebGLRenderer({ canvas, antialias: false }); }
+    catch (e2) { showError('WebGL Error', 'Cannot create WebGL renderer.'); throw e2; }
 }
-renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+renderer.setSize(initDims.width, initDims.height);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.4;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-console.log('✅ WebGL renderer created');
 
+setTimeout(() => {
+    const d = getCanvasDimensions();
+    camera.aspect = d.width / d.height;
+    camera.updateProjectionMatrix();
+    renderer.setSize(d.width, d.height);
+}, 200);
+
+// Controls
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.target.set(0, 1.5, 0);
+controls.target.set(0, 1.45, 0);
 controls.enableDamping = true;
-controls.dampingFactor = 0.06;
+controls.dampingFactor = 0.07;
 controls.enablePan = false;
-controls.minDistance = 1.2;
-controls.maxDistance = 4.5;
-controls.minPolarAngle = Math.PI / 4;
-controls.maxPolarAngle = Math.PI / 1.7;
+controls.minDistance = 0.8;
+controls.maxDistance = 5.0;
+controls.minPolarAngle = Math.PI / 5;
+controls.maxPolarAngle = Math.PI / 1.6;
 controls.update();
 
-// ─── Lighting ────────────────────────────────────────────────────────────
-scene.add(new THREE.HemisphereLight(0xffeedd, 0x080820, 0.7));
+// ─── Lighting (studio setup) ───────────────────────────────────────────
+const ambientLight = new THREE.HemisphereLight(0xffeedd, 0x080820, 0.7);
+scene.add(ambientLight);
 
-const keyLight = new THREE.DirectionalLight(0xfff5ee, 2.5);
-keyLight.position.set(2.5, 4.5, 4);
+const keyLight = new THREE.DirectionalLight(0xfff0e6, 3.0);
+keyLight.position.set(2, 5, 4);
 keyLight.castShadow = true;
 keyLight.shadow.mapSize.set(2048, 2048);
-keyLight.shadow.camera.near = 0.2;
+keyLight.shadow.camera.near = 0.5;
 keyLight.shadow.camera.far = 15;
 keyLight.shadow.camera.left = -3;
 keyLight.shadow.camera.right = 3;
-keyLight.shadow.camera.top = 3;
+keyLight.shadow.camera.top = 4;
 keyLight.shadow.camera.bottom = -1;
-keyLight.shadow.bias = -0.0005;
+keyLight.shadow.bias = -0.0004;
 keyLight.shadow.normalBias = 0.02;
 scene.add(keyLight);
 
-const fillLight = new THREE.DirectionalLight(0xb39ddb, 0.9);
-fillLight.position.set(-3.5, 2.5, 0);
+const fillLight = new THREE.DirectionalLight(0xb0a0f0, 0.9);
+fillLight.position.set(-3.5, 2, 1);
 scene.add(fillLight);
 
-const rimLight = new THREE.DirectionalLight(0xf06292, 0.75);
-rimLight.position.set(0.5, 3, -5);
+const rimLight = new THREE.DirectionalLight(0xf08090, 0.6);
+rimLight.position.set(0.5, 3, -4);
 scene.add(rimLight);
 
-const chinFill = new THREE.PointLight(0xfff8e1, 0.35, 4);
-chinFill.position.set(0, 0.8, 1.5);
-scene.add(chinFill);
+const faceLight = new THREE.PointLight(0xfff5ee, 0.6, 5);
+faceLight.position.set(0, 1.6, 2.0);
+scene.add(faceLight);
 
-const accentSpot = new THREE.SpotLight(0x7c6fff, 0.5, 10, Math.PI / 6, 0.5, 1);
+const accentSpot = new THREE.SpotLight(0x7c6fff, 0.45, 10, Math.PI / 7, 0.5, 1);
 accentSpot.position.set(-2, 5, 2);
 accentSpot.target.position.set(0, 1.4, 0);
 scene.add(accentSpot, accentSpot.target);
 
-// ─── Environment Map ─────────────────────────────────────────────────────
-const envScene = new THREE.Scene();
-const envGeo = new THREE.SphereGeometry(50, 32, 32);
-const envMat = new THREE.MeshBasicMaterial({ side: THREE.BackSide, vertexColors: true });
-const tmpC = new THREE.Color();
-const eCols = [];
-const ePos = envGeo.attributes.position;
-for (let i = 0; i < ePos.count; i++) {
-    const t = (ePos.getY(i) / 50 + 1) / 2;
-    tmpC.setHSL(0.7 - t * 0.15, 0.3, 0.05 + t * 0.15);
-    eCols.push(tmpC.r, tmpC.g, tmpC.b);
-}
-envGeo.setAttribute('color', new THREE.Float32BufferAttribute(eCols, 3));
-envScene.add(new THREE.Mesh(envGeo, envMat));
-const cubeRT = new THREE.WebGLCubeRenderTarget(256);
-const cubeCam = new THREE.CubeCamera(0.1, 100, cubeRT);
-cubeCam.update(renderer, envScene);
-const envMap = cubeRT.texture;
-
-// ─── Ground ──────────────────────────────────────────────────────────────
+// ─── Ground & Particles ─────────────────────────────────────────────────
 const ground = new THREE.Mesh(
-    new THREE.CircleGeometry(5, 64),
-    new THREE.MeshStandardMaterial({ color: 0x08081a, roughness: 0.92, metalness: 0.05, envMap, envMapIntensity: 0.1 })
+    new THREE.CircleGeometry(8, 64),
+    new THREE.MeshStandardMaterial({ color: 0x060612, roughness: 0.95, metalness: 0.02 })
 );
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
 
-// ─── Particles ───────────────────────────────────────────────────────────
-const P_COUNT = 300;
+// Glow ring
+const ringGeo = new THREE.RingGeometry(0.4, 0.55, 64);
+const ringMat = new THREE.MeshBasicMaterial({ color: 0x7c6fff, transparent: true, opacity: 0.08, side: THREE.DoubleSide });
+const glowRing = new THREE.Mesh(ringGeo, ringMat);
+glowRing.rotation.x = -Math.PI / 2;
+glowRing.position.y = 0.005;
+scene.add(glowRing);
+
+// Particles
+const P_COUNT = 250;
 const pGeo = new THREE.BufferGeometry();
 const pPos = new Float32Array(P_COUNT * 3);
 const pCol = new Float32Array(P_COUNT * 3);
 const pSpd = new Float32Array(P_COUNT);
+const tmpC = new THREE.Color();
 for (let i = 0; i < P_COUNT; i++) {
     pPos[i * 3] = (Math.random() - 0.5) * 16;
     pPos[i * 3 + 1] = Math.random() * 8;
     pPos[i * 3 + 2] = (Math.random() - 0.5) * 16;
-    tmpC.setHSL(0.7 + (Math.random() - 0.5) * 0.2, 0.5 + Math.random() * 0.4, 0.4 + Math.random() * 0.3);
+    tmpC.setHSL(0.68 + (Math.random() - 0.5) * 0.2, 0.5 + Math.random() * 0.3, 0.35 + Math.random() * 0.3);
     pCol[i * 3] = tmpC.r; pCol[i * 3 + 1] = tmpC.g; pCol[i * 3 + 2] = tmpC.b;
-    pSpd[i] = 0.1 + Math.random() * 0.4;
+    pSpd[i] = 0.08 + Math.random() * 0.35;
 }
 pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
 pGeo.setAttribute('color', new THREE.BufferAttribute(pCol, 3));
 scene.add(new THREE.Points(pGeo, new THREE.PointsMaterial({
-    size: 0.025, transparent: true, opacity: 0.4,
+    size: 0.02, transparent: true, opacity: 0.35,
     blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true, vertexColors: true,
 })));
 
-// ═══════════════════════════════════════════════════════════════════════════
-// SECTION 2 — Advanced Procedural Avatar
-// ═══════════════════════════════════════════════════════════════════════════
-const avatarGroup = new THREE.Group();
-scene.add(avatarGroup);
-
-// Materials
-const skinMat = new THREE.MeshStandardMaterial({
-    color: 0xe8beac, roughness: 0.5, metalness: 0.02, envMap, envMapIntensity: 0.35,
-});
-const skinMatDark = new THREE.MeshStandardMaterial({
-    color: 0xd4a092, roughness: 0.45, metalness: 0.02, envMap, envMapIntensity: 0.3,
-});
-const lipMat = new THREE.MeshStandardMaterial({
-    color: 0xc4837a, roughness: 0.35, metalness: 0.05, envMap, envMapIntensity: 0.2,
-});
-const clothMat = new THREE.MeshStandardMaterial({
-    color: 0x1a1a3e, roughness: 0.35, metalness: 0.15, envMap, envMapIntensity: 0.2,
-});
-const hairMat = new THREE.MeshStandardMaterial({
-    color: 0x2a1a0a, roughness: 0.7, metalness: 0.1, envMap, envMapIntensity: 0.1,
-});
-const mouthInsideMat = new THREE.MeshStandardMaterial({
-    color: 0x4a1515, roughness: 0.8, side: THREE.DoubleSide,
-});
-const teethMat = new THREE.MeshStandardMaterial({
-    color: 0xf0ece8, roughness: 0.2, metalness: 0.05,
-});
-const tongueMat = new THREE.MeshStandardMaterial({
-    color: 0xc45555, roughness: 0.6, metalness: 0.02,
-});
-
-// ─── BODY ────────────────────────────────────────────────────────────────
-const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.24, 0.65, 32), clothMat);
-torso.position.set(0, 1.1, 0); torso.castShadow = true;
-avatarGroup.add(torso);
-
-const chest = new THREE.Mesh(new THREE.SphereGeometry(0.22, 32, 24, 0, Math.PI * 2, 0, Math.PI / 2), clothMat);
-chest.position.set(0, 1.42, 0); chest.scale.set(1, 0.5, 0.85); chest.castShadow = true;
-avatarGroup.add(chest);
-
-const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.08, 0.12, 16), skinMat);
-neck.position.set(0, 1.53, 0); neck.castShadow = true;
-avatarGroup.add(neck);
-
-const leftShoulder = new THREE.Mesh(new THREE.SphereGeometry(0.07, 16, 16), clothMat);
-leftShoulder.position.set(-0.28, 1.38, 0); leftShoulder.castShadow = true;
-avatarGroup.add(leftShoulder);
-
-const rightShoulder = new THREE.Mesh(new THREE.SphereGeometry(0.07, 16, 16), clothMat);
-rightShoulder.position.set(0.28, 1.38, 0); rightShoulder.castShadow = true;
-avatarGroup.add(rightShoulder);
-
-const leftArm = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, 0.45, 12), clothMat);
-leftArm.position.set(-0.32, 1.1, 0); leftArm.rotation.z = 0.1; leftArm.castShadow = true;
-avatarGroup.add(leftArm);
-
-const rightArm = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, 0.45, 12), clothMat);
-rightArm.position.set(0.32, 1.1, 0); rightArm.rotation.z = -0.1; rightArm.castShadow = true;
-avatarGroup.add(rightArm);
-
-const leftHand = new THREE.Mesh(new THREE.SphereGeometry(0.035, 12, 12), skinMat);
-leftHand.position.set(-0.34, 0.85, 0); leftHand.scale.set(0.8, 1.2, 0.6);
-avatarGroup.add(leftHand);
-
-const rightHand = new THREE.Mesh(new THREE.SphereGeometry(0.035, 12, 12), skinMat);
-rightHand.position.set(0.34, 0.85, 0); rightHand.scale.set(0.8, 1.2, 0.6);
-avatarGroup.add(rightHand);
-
-// ─── HEAD ────────────────────────────────────────────────────────────────
-const headGroup = new THREE.Group();
-headGroup.position.set(0, 1.64, 0);
-avatarGroup.add(headGroup);
-
-const skull = new THREE.Mesh(new THREE.SphereGeometry(0.14, 48, 48), skinMat);
-skull.scale.set(1, 1.1, 0.95); skull.castShadow = true;
-headGroup.add(skull);
-
-// Jaw
-const jaw = new THREE.Mesh(
-    new THREE.SphereGeometry(0.1, 32, 16, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2),
-    skinMat
-);
-jaw.position.set(0, -0.04, 0.04);
-jaw.scale.set(1.15, 0.6, 0.85); jaw.castShadow = true;
-headGroup.add(jaw);
-
-// Chin — moves with jaw
-const chin = new THREE.Mesh(new THREE.SphereGeometry(0.03, 16, 12), skinMat);
-chin.position.set(0, -0.09, 0.1);
-headGroup.add(chin);
-
-// Cheeks
-const leftCheek = new THREE.Mesh(new THREE.SphereGeometry(0.04, 12, 8), skinMat);
-leftCheek.position.set(-0.09, -0.02, 0.09); leftCheek.scale.set(1, 0.8, 0.6);
-headGroup.add(leftCheek);
-const rightCheek = new THREE.Mesh(new THREE.SphereGeometry(0.04, 12, 8), skinMat);
-rightCheek.position.set(0.09, -0.02, 0.09); rightCheek.scale.set(1, 0.8, 0.6);
-headGroup.add(rightCheek);
-
-// Nose
-const nose = new THREE.Mesh(new THREE.ConeGeometry(0.018, 0.04, 8), skinMatDark);
-nose.position.set(0, -0.01, 0.135); nose.rotation.x = -0.2;
-headGroup.add(nose);
-const noseBridge = new THREE.Mesh(new THREE.SphereGeometry(0.016, 8, 8), skinMat);
-noseBridge.position.set(0, 0.01, 0.132);
-headGroup.add(noseBridge);
-
-// Nasolabial folds
-const nlLeft = new THREE.Mesh(new THREE.CylinderGeometry(0.003, 0.002, 0.04, 6), skinMatDark);
-nlLeft.position.set(-0.04, -0.03, 0.12); nlLeft.rotation.z = 0.2;
-headGroup.add(nlLeft);
-const nlRight = new THREE.Mesh(new THREE.CylinderGeometry(0.003, 0.002, 0.04, 6), skinMatDark);
-nlRight.position.set(0.04, -0.03, 0.12); nlRight.rotation.z = -0.2;
-headGroup.add(nlRight);
-
-// ─── EYES ────────────────────────────────────────────────────────────────
-function createEye(x) {
-    const g = new THREE.Group();
-    g.position.set(x, 0.025, 0.115);
-    const sclera = new THREE.Mesh(
-        new THREE.SphereGeometry(0.022, 24, 24),
-        new THREE.MeshStandardMaterial({ color: 0xfafafa, roughness: 0.15, metalness: 0.05 })
-    );
-    g.add(sclera);
-    const iris = new THREE.Mesh(
-        new THREE.SphereGeometry(0.013, 20, 20),
-        new THREE.MeshStandardMaterial({ color: 0x3a6b4a, roughness: 0.3, metalness: 0.2 })
-    );
-    iris.position.z = 0.012;
-    g.add(iris);
-    const pupil = new THREE.Mesh(
-        new THREE.SphereGeometry(0.007, 16, 16),
-        new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.1, metalness: 0.3 })
-    );
-    pupil.position.z = 0.018;
-    g.add(pupil);
-    g.userData.pupil = pupil;
-    const spec = new THREE.Mesh(
-        new THREE.SphereGeometry(0.003, 8, 8),
-        new THREE.MeshBasicMaterial({ color: 0xffffff })
-    );
-    spec.position.set(0.005, 0.005, 0.022);
-    g.add(spec);
-    return g;
-}
-
-const leftEye = createEye(-0.045);
-const rightEye = createEye(0.045);
-headGroup.add(leftEye, rightEye);
-
-// Eyelids
-function createEyelid(x, isUpper) {
-    const lid = new THREE.Mesh(
-        new THREE.SphereGeometry(0.028, 16, 8, 0, Math.PI * 2, 0, Math.PI / 3),
-        skinMat
-    );
-    lid.position.set(x, 0.025, 0.115);
-    lid.rotation.x = isUpper ? -0.4 : 0.8;
-    lid.scale.set(1, isUpper ? 1.2 : 0.8, 1);
-    return lid;
-}
-const leftUpperLid = createEyelid(-0.045, true);
-const rightUpperLid = createEyelid(0.045, true);
-const leftLowerLid = createEyelid(-0.045, false);
-const rightLowerLid = createEyelid(0.045, false);
-headGroup.add(leftUpperLid, rightUpperLid, leftLowerLid, rightLowerLid);
-
-// Eyebrows
-function createEyebrow(x) {
-    const brow = new THREE.Mesh(
-        new THREE.BoxGeometry(0.04, 0.006, 0.01),
-        new THREE.MeshStandardMaterial({ color: 0x3a2510, roughness: 0.8 })
-    );
-    brow.position.set(x, 0.055, 0.12);
-    brow.rotation.z = x > 0 ? 0.05 : -0.05;
-    return brow;
-}
-const leftBrow = createEyebrow(-0.045);
-const rightBrow = createEyebrow(0.045);
-headGroup.add(leftBrow, rightBrow);
-
-// ─── MOUTH (enhanced) ───────────────────────────────────────────────────
-const mouthGroup = new THREE.Group();
-mouthGroup.position.set(0, -0.055, 0.115);
-headGroup.add(mouthGroup);
-
-const upperLip = new THREE.Mesh(new THREE.TorusGeometry(0.025, 0.006, 12, 24, Math.PI), lipMat);
-upperLip.rotation.x = Math.PI;
-upperLip.position.y = 0.005;
-mouthGroup.add(upperLip);
-
-const lowerLip = new THREE.Mesh(new THREE.TorusGeometry(0.023, 0.007, 12, 24, Math.PI), lipMat);
-lowerLip.position.y = -0.003;
-mouthGroup.add(lowerLip);
-
-const mouthInside = new THREE.Mesh(new THREE.PlaneGeometry(0.04, 0.025), mouthInsideMat);
-mouthInside.position.set(0, 0, -0.005);
-mouthInside.visible = false;
-mouthGroup.add(mouthInside);
-
-const teethUpper = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.008, 0.005), teethMat);
-teethUpper.position.set(0, 0.004, -0.002);
-teethUpper.visible = false;
-mouthGroup.add(teethUpper);
-
-const teethLower = new THREE.Mesh(new THREE.BoxGeometry(0.032, 0.007, 0.005), teethMat);
-teethLower.position.set(0, -0.005, -0.002);
-teethLower.visible = false;
-mouthGroup.add(teethLower);
-
-// Tongue
-const tongue = new THREE.Mesh(
-    new THREE.SphereGeometry(0.012, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2),
-    tongueMat
-);
-tongue.position.set(0, -0.006, -0.003);
-tongue.scale.set(1.2, 0.5, 1.4);
-tongue.visible = false;
-mouthGroup.add(tongue);
-
-// ─── HAIR ────────────────────────────────────────────────────────────────
-const hairTop = new THREE.Mesh(
-    new THREE.SphereGeometry(0.15, 32, 24, 0, Math.PI * 2, 0, Math.PI / 1.8), hairMat
-);
-hairTop.position.set(0, 0.03, -0.01); hairTop.scale.set(1.02, 1.05, 1);
-headGroup.add(hairTop);
-
-const hairSide1 = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.02, 0.12, 8), hairMat);
-hairSide1.position.set(-0.12, -0.02, -0.04); hairSide1.rotation.z = 0.3;
-headGroup.add(hairSide1);
-
-const hairSide2 = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.02, 0.12, 8), hairMat);
-hairSide2.position.set(0.12, -0.02, -0.04); hairSide2.rotation.z = -0.3;
-headGroup.add(hairSide2);
-
-const hairBack = new THREE.Mesh(
-    new THREE.SphereGeometry(0.13, 16, 16, 0, Math.PI * 2, Math.PI / 4, Math.PI / 2), hairMat
-);
-hairBack.position.set(0, 0.01, -0.06); hairBack.rotation.x = 0.3;
-headGroup.add(hairBack);
-
-// Ears
-function createEar(x) {
-    const ear = new THREE.Mesh(new THREE.SphereGeometry(0.022, 8, 12), skinMat);
-    ear.position.set(x * 0.14, 0.005, 0);
-    ear.scale.set(0.5, 1, 0.7);
-    return ear;
-}
-headGroup.add(createEar(-1), createEar(1));
-
-updateStatus('Online');
-console.log('🧑 Advanced procedural avatar created (v4.0)');
+console.log('✅ Scene, lighting, environment ready');
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SECTION 3 — Lip Sync & Mouth Animation (improved)
+// SECTION 2 — Load GLB Avatar (Ready Player Me)
 // ═══════════════════════════════════════════════════════════════════════════
-const mouth = { open: 0, wide: 0, round: 0, pucker: 0, smile: 0, frown: 0 };
-const mouthTarget = { open: 0, wide: 0, round: 0, pucker: 0, smile: 0, frown: 0 };
 
-// Viseme → mouth shape + tongue visibility
-const VISEME_TO_MOUTH = {
-    'viseme_aa':  { open: 0.75, wide: 0.65, round: 0.1, pucker: 0,    smile: 0,   frown: 0, tongue: 0.3 },
-    'viseme_E':   { open: 0.4,  wide: 0.7,  round: 0,   pucker: 0,    smile: 0.2, frown: 0, tongue: 0.2 },
-    'viseme_I':   { open: 0.3,  wide: 0.55, round: 0,   pucker: 0,    smile: 0.3, frown: 0, tongue: 0.15 },
-    'viseme_O':   { open: 0.65, wide: 0.1,  round: 0.85, pucker: 0.3, smile: 0,   frown: 0, tongue: 0.1 },
-    'viseme_U':   { open: 0.3,  wide: 0,    round: 0.65, pucker: 0.65, smile: 0,  frown: 0, tongue: 0 },
-    'viseme_PP':  { open: 0.02, wide: 0,    round: 0,   pucker: 0.85, smile: 0,   frown: 0, tongue: 0 },
-    'viseme_FF':  { open: 0.08, wide: 0.2,  round: 0,   pucker: 0.4, smile: 0,   frown: 0, tongue: 0 },
-    'viseme_TH':  { open: 0.2,  wide: 0.3,  round: 0,   pucker: 0,   smile: 0,   frown: 0, tongue: 0.7 },
-    'viseme_DD':  { open: 0.2,  wide: 0.3,  round: 0.1, pucker: 0,   smile: 0,   frown: 0, tongue: 0.5 },
-    'viseme_kk':  { open: 0.35, wide: 0.2,  round: 0.1, pucker: 0,   smile: 0,   frown: 0, tongue: 0.4 },
-    'viseme_CH':  { open: 0.2,  wide: 0.1,  round: 0.3, pucker: 0.3, smile: 0,   frown: 0, tongue: 0.3 },
-    'viseme_SS':  { open: 0.12, wide: 0.45, round: 0,   pucker: 0,   smile: 0.1, frown: 0, tongue: 0.2 },
-    'viseme_nn':  { open: 0.08, wide: 0.2,  round: 0,   pucker: 0,   smile: 0,   frown: 0, tongue: 0.5 },
-    'viseme_RR':  { open: 0.25, wide: 0.1,  round: 0.4, pucker: 0.2, smile: 0,   frown: 0, tongue: 0.6 },
-    'viseme_sil': { open: 0,    wide: 0,    round: 0,   pucker: 0,   smile: 0,   frown: 0, tongue: 0 },
+// ─── Avatar state ────────────────────────────────────────────────────────
+let avatarModel = null;          // The loaded GLTF scene
+let headMesh = null;             // Primary SkinnedMesh (most morph targets)
+let morphDict = null;            // Combined morphTargetDictionary (union of all meshes)
+let morphInfluences = null;      // morphTargetInfluences of primary mesh
+let allMorphMeshes = [];         // ALL meshes with morph targets (head, teeth, tongue, body...)
+let skeleton = null;             // Skeleton for body animation
+let headBone = null;             // Head bone reference
+let neckBone = null;             // Neck bone reference
+let spineBone = null;            // Spine bone reference
+let leftArmBone = null;
+let rightArmBone = null;
+let leftForeArmBone = null;
+let rightForeArmBone = null;
+let hips = null;
+let mixer = null;                // AnimationMixer (if model has animations)
+let avatarLoaded = false;
+
+// ─── Loading overlay ────────────────────────────────────────────────────
+const loadOverlay = document.createElement('div');
+loadOverlay.style.cssText = `position:absolute;top:0;left:0;width:100%;height:100%;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    background:rgba(8,8,24,0.92);z-index:50;transition:opacity 0.5s`;
+loadOverlay.innerHTML = `
+    <div style="width:48px;height:48px;border:3px solid rgba(124,111,255,0.2);border-top:3px solid #7c6fff;border-radius:50%;animation:spin 1s linear infinite"></div>
+    <p style="color:#a09bb8;margin-top:18px;font-family:system-ui;font-size:14px" id="load-status">Loading avatar model...</p>
+    <style>@keyframes spin{to{transform:rotate(360deg)}}</style>`;
+canvas.parentElement.style.position = 'relative';
+canvas.parentElement.appendChild(loadOverlay);
+
+function updateLoadStatus(msg) {
+    const el = document.getElementById('load-status');
+    if (el) el.textContent = msg;
+}
+
+// ─── Load the model ──────────────────────────────────────────────────────
+const AVATAR_URL = '/models/avatar.glb';
+
+async function loadAvatar() {
+    const loader = new GLTFLoader();
+
+    try {
+        updateLoadStatus('Loading 3D avatar...');
+        console.log('📦 Loading avatar from:', AVATAR_URL);
+
+        const gltf = await loader.loadAsync(AVATAR_URL);
+        avatarModel = gltf.scene;
+
+        // ─── Scale & Position ────────────────────────────────────────
+        avatarModel.scale.set(1, 1, 1);
+        avatarModel.position.set(0, 0, 0);
+
+        // ─── Find ALL morph target meshes ─────────────────────────────
+        const morphMeshes = [];
+        allMorphMeshes = [];
+        avatarModel.traverse((child) => {
+            // Enable shadows on all meshes
+            if (child.isMesh) {
+                child.castShadow = true;
+                child.receiveShadow = true;
+
+                // Improve materials
+                if (child.material) {
+                    const mats = Array.isArray(child.material) ? child.material : [child.material];
+                    mats.forEach(mat => {
+                        mat.envMapIntensity = 0.4;
+                    });
+                }
+            }
+
+            // Collect ALL meshes with morph targets (head, teeth, tongue, body...)
+            if (child.isSkinnedMesh && child.morphTargetDictionary) {
+                const count = Object.keys(child.morphTargetDictionary).length;
+                morphMeshes.push({ mesh: child, count });
+                allMorphMeshes.push(child);
+                console.log(`  Found morph mesh: "${child.name}" with ${count} blend shapes`);
+                console.log(`    Morphs: ${Object.keys(child.morphTargetDictionary).join(', ')}`);
+            }
+        });
+
+        // Build COMBINED morph dictionary from ALL meshes
+        if (morphMeshes.length > 0) {
+            morphMeshes.sort((a, b) => b.count - a.count);
+            headMesh = morphMeshes[0].mesh;
+
+            // Union of all morph target names across all meshes
+            morphDict = {};
+            allMorphMeshes.forEach(mesh => {
+                for (const name in mesh.morphTargetDictionary) {
+                    if (!(name in morphDict)) morphDict[name] = true;
+                }
+            });
+
+            morphInfluences = headMesh.morphTargetInfluences;
+            console.log('🎭 Primary morph mesh:', headMesh.name);
+            console.log('🎭 Total morph meshes:', allMorphMeshes.length);
+            console.log('🎭 Combined unique blend shapes:', Object.keys(morphDict).length);
+            console.log('   All morphs:', Object.keys(morphDict).join(', '));
+
+            // Detect available morph target types
+            detectMorphCapabilities();
+        } else {
+            console.warn('⚠️ No morph targets found in avatar model');
+            showNotification('Avatar loaded but no blend shapes found for lip sync', 'warning');
+        }
+
+        // ─── Find skeleton bones ─────────────────────────────────────
+        avatarModel.traverse((child) => {
+            if (child.isBone) {
+                const name = child.name.toLowerCase();
+                if (name.includes('head') && !headBone) headBone = child;
+                else if (name.includes('neck') && !neckBone) neckBone = child;
+                else if (name.includes('spine') && !spineBone) spineBone = child;
+                else if (name.includes('hips') && !hips) hips = child;
+                else if ((name.includes('leftarm') || name.includes('left_arm') || name.includes('leftupperarm')) && !leftArmBone) leftArmBone = child;
+                else if ((name.includes('rightarm') || name.includes('right_arm') || name.includes('rightupperarm')) && !rightArmBone) rightArmBone = child;
+                else if ((name.includes('leftforearm') || name.includes('left_forearm')) && !leftForeArmBone) leftForeArmBone = child;
+                else if ((name.includes('rightforearm') || name.includes('right_forearm')) && !rightForeArmBone) rightForeArmBone = child;
+            }
+            if (child.isSkinnedMesh && child.skeleton && !skeleton) {
+                skeleton = child.skeleton;
+            }
+        });
+
+        if (skeleton) {
+            console.log('🦴 Skeleton found with', skeleton.bones.length, 'bones');
+            console.log('   Bones:', skeleton.bones.map(b => b.name).join(', '));
+        }
+        if (headBone) console.log('   Head bone:', headBone.name);
+        if (neckBone) console.log('   Neck bone:', neckBone.name);
+
+        // ─── Handle animations ───────────────────────────────────────
+        if (gltf.animations && gltf.animations.length > 0) {
+            mixer = new THREE.AnimationMixer(avatarModel);
+            console.log(`🎬 ${gltf.animations.length} animation(s) found`);
+            // Don't auto-play — we drive animations ourselves
+        }
+
+        // ─── Add to scene ────────────────────────────────────────────
+        scene.add(avatarModel);
+        avatarLoaded = true;
+
+        // ─── Adjust camera based on avatar bounds ────────────────────
+        const box = new THREE.Box3().setFromObject(avatarModel);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+        console.log('📐 Avatar bounds:', size, 'center:', center);
+
+        // Position camera to frame the upper body / head
+        const headY = headBone ? headBone.getWorldPosition(new THREE.Vector3()).y : center.y + size.y * 0.3;
+        camera.position.set(0, headY, size.y * 1.5 + 1.0);
+        controls.target.set(0, headY - 0.08, 0);
+        controls.update();
+
+        // ─── Hide loading overlay ────────────────────────────────────
+        updateLoadStatus('Avatar loaded!');
+        setTimeout(() => {
+            loadOverlay.style.opacity = '0';
+            setTimeout(() => loadOverlay.remove(), 500);
+        }, 300);
+
+        showNotification('3D avatar loaded successfully!', 'success');
+        console.log('✅ Avatar loaded and ready');
+
+    } catch (error) {
+        console.error('❌ Failed to load avatar:', error);
+        updateLoadStatus('Failed to load avatar');
+        showError('Avatar Load Error',
+            `Could not load the 3D model.<br><br>Error: ${error.message}<br><br>
+            Make sure <code>/models/avatar.glb</code> exists in the public folder.`);
+        loadOverlay.style.opacity = '0';
+        setTimeout(() => loadOverlay.remove(), 500);
+    }
+}
+
+// ─── Detect morph capabilities ───────────────────────────────────────────
+let hasOculusVisemes = false;
+let hasARKitMorphs = false;
+
+function detectMorphCapabilities() {
+    if (!morphDict) return;
+    const keys = Object.keys(morphDict);
+
+    // Check for Oculus Viseme blend shapes
+    hasOculusVisemes = keys.some(k => k.startsWith('viseme_'));
+
+    // Check for ARKit blend shapes
+    hasARKitMorphs = keys.some(k => k === 'jawOpen' || k === 'mouthSmileLeft');
+
+    console.log('🔍 Morph capabilities:', {
+        oculusVisemes: hasOculusVisemes,
+        arkitMorphs: hasARKitMorphs,
+        totalMorphs: keys.length
+    });
+}
+
+// Kick off loading
+loadAvatar();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 3 — Morph-Target Lip Sync System
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Viseme → Morph Target Mapping ──────────────────────────────────────
+
+// For models WITH Oculus Viseme blend shapes (Ready Player Me with ?morphTargets=Oculus+Visemes)
+// These map 1:1 — viseme name directly matches morph target name
+const OCULUS_VISEMES = [
+    'viseme_sil', 'viseme_PP', 'viseme_FF', 'viseme_TH', 'viseme_DD',
+    'viseme_kk', 'viseme_CH', 'viseme_SS', 'viseme_nn', 'viseme_RR',
+    'viseme_aa', 'viseme_E', 'viseme_I', 'viseme_O', 'viseme_U',
+];
+
+// For models with ARKit blend shapes only (map visemes → multiple ARKit morphs)
+const VISEME_TO_ARKIT = {
+    'viseme_sil': {},
+    'viseme_aa':  { jawOpen: 0.75, mouthFunnel: 0.2 },
+    'viseme_E':   { jawOpen: 0.22, mouthSmileLeft: 0.35, mouthSmileRight: 0.35, mouthStretchLeft: 0.25, mouthStretchRight: 0.25 },
+    'viseme_I':   { jawOpen: 0.1, mouthSmileLeft: 0.5, mouthSmileRight: 0.5 },
+    'viseme_O':   { jawOpen: 0.55, mouthFunnel: 0.65, mouthPucker: 0.3 },
+    'viseme_U':   { jawOpen: 0.12, mouthPucker: 0.75, mouthFunnel: 0.45 },
+    'viseme_PP':  { mouthClose: 0.85, mouthPressLeft: 0.55, mouthPressRight: 0.55 },
+    'viseme_FF':  { jawOpen: 0.06, mouthRollLower: 0.35, mouthUpperUpLeft: 0.2, mouthUpperUpRight: 0.2 },
+    'viseme_TH':  { jawOpen: 0.15, tongueOut: 0.55, mouthLowerDownLeft: 0.08, mouthLowerDownRight: 0.08 },
+    'viseme_DD':  { jawOpen: 0.18, tongueOut: 0.12, mouthClose: 0.08 },
+    'viseme_kk':  { jawOpen: 0.28, mouthFunnel: 0.08, mouthShrugUpper: 0.08 },
+    'viseme_CH':  { jawOpen: 0.12, mouthPucker: 0.45, mouthFunnel: 0.2 },
+    'viseme_SS':  { jawOpen: 0.06, mouthStretchLeft: 0.3, mouthStretchRight: 0.3, mouthClose: 0.12 },
+    'viseme_nn':  { jawOpen: 0.05, mouthClose: 0.12, tongueOut: 0.06 },
+    'viseme_RR':  { jawOpen: 0.18, mouthPucker: 0.22, mouthFunnel: 0.12, mouthRollLower: 0.1 },
 };
 
-let currentTongueTarget = 0, currentTongue = 0;
+// ─── Morph target blending state ─────────────────────────────────────────
+const morphTargetTarget = {};    // target values for this frame
 
-function setMouthFromViseme(name, intensity = 1.0) {
-    const shape = VISEME_TO_MOUTH[name];
-    if (!shape) return;
-    for (const k in mouthTarget) {
-        if (k in shape) mouthTarget[k] = Math.max(mouthTarget[k], shape[k] * intensity);
-    }
-    if (shape.tongue !== undefined) {
-        currentTongueTarget = Math.max(currentTongueTarget, shape.tongue * intensity);
+function setMorph(name, value) {
+    if (!morphDict || !(name in morphDict)) return;
+    morphTargetTarget[name] = Math.max(morphTargetTarget[name] || 0, value);
+}
+
+function resetMorphTargets() {
+    for (const k in morphTargetTarget) morphTargetTarget[k] = 0;
+}
+
+function applyViseme(visemeName, intensity = 1.0) {
+    if (!morphDict) return;
+
+    if (hasOculusVisemes && (visemeName in morphDict)) {
+        // Direct Oculus Viseme mapping — set it on the combined dict
+        setMorph(visemeName, intensity);
+    } else if (hasARKitMorphs) {
+        // Map through ARKit blend shapes
+        const mapping = VISEME_TO_ARKIT[visemeName];
+        if (mapping) {
+            for (const [morph, weight] of Object.entries(mapping)) {
+                setMorph(morph, weight * intensity);
+            }
+        }
     }
 }
 
-function resetMouthTarget() {
-    for (const k in mouthTarget) mouthTarget[k] = 0;
-    currentTongueTarget = 0;
-}
+// Apply morph targets to ALL meshes (head, teeth, tongue, body)
+function updateMorphTargets(delta) {
+    if (!morphDict || allMorphMeshes.length === 0) return;
 
-function updateMouthAnimation(delta) {
-    const openRate = 1 - Math.exp(-18 * delta);
-    const closeRate = 1 - Math.exp(-12 * delta);
-    for (const k in mouth) {
-        const rate = mouthTarget[k] > mouth[k] ? openRate : closeRate;
-        mouth[k] += (mouthTarget[k] - mouth[k]) * rate;
-    }
-    currentTongue += (currentTongueTarget - currentTongue) * openRate;
+    // Faster rates for crisp lip shapes
+    const openRate = 1 - Math.exp(-45 * delta);   // fast open
+    const closeRate = 1 - Math.exp(-30 * delta);   // fast close
 
-    // Jaw drop
-    const jawDrop = mouth.open * 0.018;
-    jaw.position.y = -0.04 - jawDrop;
-    chin.position.y = -0.09 - jawDrop * 1.2;
+    // Apply to EVERY mesh that has morph targets
+    for (const mesh of allMorphMeshes) {
+        const dict = mesh.morphTargetDictionary;
+        const influences = mesh.morphTargetInfluences;
+        if (!dict || !influences) continue;
 
-    // Lip shape
-    const lipW = 1 + mouth.wide * 0.3 - mouth.round * 0.2;
-    const lipP = 1 + mouth.pucker * 0.15;
-    upperLip.scale.set(lipW, 1, lipP);
-    lowerLip.scale.set(lipW, 1, lipP);
-    lowerLip.position.y = -0.003 - jawDrop * 0.8;
-    upperLip.position.y = 0.005;
-
-    // Lip roundness push forward
-    const fwd = mouth.round > 0.2 ? mouth.round * 0.006 : 0;
-    upperLip.position.z = fwd;
-    lowerLip.position.z = fwd;
-
-    // Cheek deformation
-    const cheekScale = 1 + mouth.wide * 0.15 - mouth.round * 0.1;
-    leftCheek.scale.x = cheekScale;
-    rightCheek.scale.x = cheekScale;
-
-    // Mouth interior
-    const showInside = mouth.open > 0.12;
-    mouthInside.visible = showInside;
-    teethUpper.visible = showInside;
-    teethLower.visible = showInside;
-    tongue.visible = showInside && currentTongue > 0.1;
-
-    if (showInside) {
-        mouthInside.scale.set(1 + mouth.wide * 0.3, mouth.open * 1.6, 1);
-        teethLower.position.y = -0.005 - jawDrop * 0.5;
-        tongue.position.y = -0.006 - jawDrop * 0.3;
-        tongue.position.z = -0.003 + currentTongue * 0.01;
-        tongue.scale.z = 1.4 + currentTongue * 0.3;
-    }
-
-    // Smile / frown
-    if (mouth.smile > 0.05) {
-        upperLip.rotation.z = mouth.smile * 0.15;
-        lowerLip.rotation.z = 0;
-    } else if (mouth.frown > 0.05) {
-        lowerLip.rotation.z = mouth.frown * 0.1;
-        upperLip.rotation.z = 0;
-    } else {
-        upperLip.rotation.z = 0;
-        lowerLip.rotation.z = 0;
+        for (const name in dict) {
+            const idx = dict[name];
+            const target = morphTargetTarget[name] || 0;
+            const current = influences[idx] || 0;
+            const rate = target > current ? openRate : closeRate;
+            influences[idx] = current + (target - current) * rate;
+            influences[idx] = Math.max(0, Math.min(1, influences[idx]));
+        }
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SECTION 4 — Eye Gaze, Blink & Pupil
+// SECTION 4 — Eye Gaze, Blink & Expressions via Morph Targets
 // ═══════════════════════════════════════════════════════════════════════════
 let mouseX = 0, mouseY = 0, smoothGazeX = 0, smoothGazeY = 0;
 let saccadeTimer = 0, saccadeX = 0, saccadeY = 0;
-let blinkAmount = 0, pupilDilation = 1;
+
+// Face tracking inputs
+let faceTrackGazeX = null, faceTrackGazeY = null;
+let faceTrackBlink = null, faceTrackSmile = null;
+let faceTrackBrowRaise = null, faceTrackMouthOpen = null;
 
 canvas.addEventListener('mousemove', (e) => {
     const r = canvas.getBoundingClientRect();
@@ -550,125 +487,217 @@ canvas.addEventListener('mousemove', (e) => {
 canvas.addEventListener('mouseleave', () => { mouseX = 0; mouseY = 0; });
 
 function updateEyeGaze(delta) {
-    smoothGazeX += (mouseX - smoothGazeX) * 0.06;
-    smoothGazeY += (mouseY - smoothGazeY) * 0.06;
+    const targetX = faceTrackGazeX !== null ? faceTrackGazeX : mouseX;
+    const targetY = faceTrackGazeY !== null ? faceTrackGazeY : mouseY;
+
+    smoothGazeX += (targetX - smoothGazeX) * 0.08;
+    smoothGazeY += (targetY - smoothGazeY) * 0.08;
+
     saccadeTimer -= delta;
     if (saccadeTimer <= 0) {
         saccadeX = (Math.random() - 0.5) * 0.06;
-        saccadeY = (Math.random() - 0.5) * 0.04;
+        saccadeY = (Math.random() - 0.5) * 0.035;
         saccadeTimer = 0.8 + Math.random() * 2.5;
     }
-    const gx = (smoothGazeX + saccadeX) * 0.01;
-    const gy = (smoothGazeY + saccadeY) * 0.008;
-    leftEye.rotation.y = gx; leftEye.rotation.x = -gy;
-    rightEye.rotation.y = gx; rightEye.rotation.x = -gy;
 
-    headGroup.rotation.y = THREE.MathUtils.lerp(headGroup.rotation.y, (smoothGazeX + saccadeX) * 0.1, 0.025);
-    headGroup.rotation.x = THREE.MathUtils.lerp(headGroup.rotation.x, -(smoothGazeY + saccadeY) * 0.05, 0.025);
+    const gx = smoothGazeX + saccadeX;
+    const gy = smoothGazeY + saccadeY;
 
-    // Pupil dilation
-    const pScale = 0.8 + pupilDilation * 0.4;
-    const lp = leftEye.userData.pupil, rp = rightEye.userData.pupil;
-    lp.scale.setScalar(THREE.MathUtils.lerp(lp.scale.x, pScale, 0.03));
-    rp.scale.setScalar(THREE.MathUtils.lerp(rp.scale.x, pScale, 0.03));
-}
+    // Eye gaze via morph targets (ARKit style)
+    if (hasARKitMorphs) {
+        const lookRight = Math.max(0, gx);
+        const lookLeft = Math.max(0, -gx);
+        const lookUp = Math.max(0, gy);
+        const lookDown = Math.max(0, -gy);
 
-let lastBlinkTime = 0, nextBlinkDelay = 3, blinkTarget = 0;
-function updateBlink(time, delta) {
-    if (time - lastBlinkTime > nextBlinkDelay) {
-        blinkTarget = 1;
-        lastBlinkTime = time;
-        nextBlinkDelay = 2.5 + Math.random() * 5;
-        setTimeout(() => { blinkTarget = 0; }, 120);
+        setMorph('eyeLookOutLeft', lookLeft * 0.7);
+        setMorph('eyeLookInLeft', lookRight * 0.7);
+        setMorph('eyeLookOutRight', lookRight * 0.7);
+        setMorph('eyeLookInRight', lookLeft * 0.7);
+        setMorph('eyeLookUpLeft', lookUp * 0.5);
+        setMorph('eyeLookUpRight', lookUp * 0.5);
+        setMorph('eyeLookDownLeft', lookDown * 0.5);
+        setMorph('eyeLookDownRight', lookDown * 0.5);
     }
-    blinkAmount += (blinkTarget - blinkAmount) * (1 - Math.exp(-20 * delta));
-    leftUpperLid.rotation.x = -0.4 + blinkAmount * 0.6;
-    rightUpperLid.rotation.x = -0.4 + blinkAmount * 0.6;
-    leftLowerLid.rotation.x = 0.8 - blinkAmount * 0.3;
-    rightLowerLid.rotation.x = 0.8 - blinkAmount * 0.3;
+
+    // Head tracking via bones (disable vertical pitch to stop up/down nodding)
+    if (headBone) {
+        const targetRotY = gx * 0.15;
+        headBone.rotation.y = THREE.MathUtils.lerp(headBone.rotation.y, targetRotY, 0.03);
+        // Keep head pitch level (no up/down nodding)
+        headBone.rotation.x = THREE.MathUtils.lerp(headBone.rotation.x, 0, 0.02);
+    }
+    if (neckBone) {
+        neckBone.rotation.y = THREE.MathUtils.lerp(neckBone.rotation.y, gx * 0.08, 0.02);
+        // Prevent neck pitch changes to avoid head bobbing
+        neckBone.rotation.x = THREE.MathUtils.lerp(neckBone.rotation.x, 0, 0.02);
+    }
+}
+
+let lastBlinkTime = 0, nextBlinkDelay = 3, blinkTarget = 0, blinkAmount = 0;
+
+function updateBlink(time, delta) {
+    if (faceTrackBlink !== null) {
+        blinkAmount = THREE.MathUtils.lerp(blinkAmount, faceTrackBlink, 0.3);
+    } else {
+        if (time - lastBlinkTime > nextBlinkDelay) {
+            blinkTarget = 1;
+            lastBlinkTime = time;
+            nextBlinkDelay = 2.5 + Math.random() * 5;
+            setTimeout(() => { blinkTarget = 0; }, 110 + Math.random() * 40);
+        }
+        blinkAmount += (blinkTarget - blinkAmount) * (1 - Math.exp(-24 * delta));
+    }
+
+    setMorph('eyeBlinkLeft', blinkAmount);
+    setMorph('eyeBlinkRight', blinkAmount);
+
+    // Subtle eye squint during blink
+    if (blinkAmount > 0.5) {
+        setMorph('eyeSquintLeft', blinkAmount * 0.3);
+        setMorph('eyeSquintRight', blinkAmount * 0.3);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SECTION 5 — Body Animations
+// SECTION 5 — Emotions & Body Idle via Morph + Bones
 // ═══════════════════════════════════════════════════════════════════════════
+const EMOTIONS = {
+    happy: {
+        mouthSmileLeft: 0.55, mouthSmileRight: 0.55,
+        cheekSquintLeft: 0.25, cheekSquintRight: 0.25,
+        eyeSquintLeft: 0.12, eyeSquintRight: 0.12,
+    },
+    sad: {
+        mouthFrownLeft: 0.45, mouthFrownRight: 0.45,
+        browInnerUp: 0.35, browDownLeft: 0.1, browDownRight: 0.1,
+    },
+    surprised: {
+        jawOpen: 0.35,
+        eyeWideLeft: 0.45, eyeWideRight: 0.45,
+        browInnerUp: 0.55, browOuterUpLeft: 0.45, browOuterUpRight: 0.45,
+    },
+    angry: {
+        browDownLeft: 0.5, browDownRight: 0.5,
+        mouthFrownLeft: 0.25, mouthFrownRight: 0.25,
+        noseSneerLeft: 0.3, noseSneerRight: 0.3,
+        jawForward: 0.15,
+    },
+    neutral: {},
+};
+
+let currentEmotion = {};
+let emotionTargetMap = {};
+let emotionTimeout = null;
+
+function setEmotion(name) {
+    emotionTargetMap = { ...(EMOTIONS[name] || EMOTIONS.neutral) };
+    updateEmotionBadge(name);
+    if (emotionTimeout) clearTimeout(emotionTimeout);
+}
+
+function updateEmotionMorphs(delta) {
+    const rate = 1 - Math.exp(-5 * delta);
+    for (const name in emotionTargetMap) {
+        const target = emotionTargetMap[name] || 0;
+        currentEmotion[name] = (currentEmotion[name] || 0) + (target - (currentEmotion[name] || 0)) * rate;
+        setMorph(name, currentEmotion[name]);
+    }
+    // Decay old emotion morphs that are no longer targeted
+    for (const name in currentEmotion) {
+        if (!(name in emotionTargetMap)) {
+            currentEmotion[name] *= (1 - rate);
+            if (currentEmotion[name] < 0.005) { delete currentEmotion[name]; }
+            else setMorph(name, currentEmotion[name]);
+        }
+    }
+}
+
+function microExpressions(time) {
+    // Subtle ambient expressions
+    const smile = (Math.sin(time * 0.35) + 1) * 0.02;
+    setMorph('mouthSmileLeft', smile);
+    setMorph('mouthSmileRight', smile);
+
+    const browShift = (Math.sin(time * 0.28 + 1.5) + 1) * 0.015;
+    setMorph('browInnerUp', browShift);
+
+    // Subtle cheek puff during breathing
+    const cheek = (Math.sin(time * 0.8) + 1) * 0.005;
+    setMorph('cheekPuff', cheek);
+}
+
+// ─── Idle body animation ────────────────────────────────────────────────
 function animateIdleBody(time) {
-    torso.scale.y = 1 + Math.sin(time * 0.8) * 0.008;
-    chest.scale.y = 0.5 + Math.sin(time * 0.8 + 0.2) * 0.005;
-    avatarGroup.rotation.y = Math.sin(time * 0.2) * 0.005;
-    leftShoulder.position.y = 1.38 + Math.sin(time * 0.8) * 0.002;
-    rightShoulder.position.y = 1.38 + Math.sin(time * 0.8 + Math.PI) * 0.002;
-    avatarGroup.position.x = Math.sin(time * 0.15) * 0.003;
+    if (!avatarLoaded) return;
+
+    // Breathing via spine bone
+    if (spineBone) {
+        const breath = Math.sin(time * 0.8) * 0.008;
+        spineBone.rotation.x = THREE.MathUtils.lerp(spineBone.rotation.x, breath, 0.05);
+    }
+
+    // Subtle weight shift
+    if (hips) {
+        hips.rotation.y = THREE.MathUtils.lerp(hips.rotation.y, Math.sin(time * 0.18) * 0.005, 0.02);
+        hips.position.x = THREE.MathUtils.lerp(hips.position.x || 0, Math.sin(time * 0.14) * 0.002, 0.02);
+    }
+
+    // Arm sway
+    if (leftArmBone) {
+        leftArmBone.rotation.z = THREE.MathUtils.lerp(leftArmBone.rotation.z,
+            (leftArmBone._baseRotZ || 0) + Math.sin(time * 0.3) * 0.01, 0.03);
+    }
+    if (rightArmBone) {
+        rightArmBone.rotation.z = THREE.MathUtils.lerp(rightArmBone.rotation.z,
+            (rightArmBone._baseRotZ || 0) + Math.sin(time * 0.3 + 1.5) * 0.01, 0.03);
+    }
 }
 
 let talkGesturePhase = 0;
 function animateTalkingBody(time, delta) {
     talkGesturePhase += delta;
-    headGroup.rotation.x += Math.sin(talkGesturePhase * 2.5) * 0.012;
-    headGroup.rotation.z = Math.sin(talkGesturePhase * 1.3) * 0.01;
-    leftShoulder.position.y = 1.38 + Math.sin(talkGesturePhase * 1.6) * 0.007;
-    rightShoulder.position.y = 1.38 + Math.sin(talkGesturePhase * 1.6 + 1.2) * 0.007;
-    leftArm.rotation.z = 0.1 + Math.sin(talkGesturePhase * 1.1) * 0.05;
-    rightArm.rotation.z = -0.1 + Math.sin(talkGesturePhase * 1.1 + 2) * 0.05;
-    leftHand.position.y = 0.85 + Math.sin(talkGesturePhase * 1.1) * 0.018;
-    rightHand.position.y = 0.85 + Math.sin(talkGesturePhase * 1.1 + 2) * 0.018;
-    torso.rotation.y = Math.sin(talkGesturePhase * 0.8) * 0.012;
-    neck.rotation.z = Math.sin(talkGesturePhase * 1.5) * 0.005;
-}
 
-// ─── Emotions ────────────────────────────────────────────────────────────
-const EMOTIONS = {
-    happy:     { smile: 0.7, frown: 0, browUp: 0.1, eyeSquint: 0.15, pupil: 1.2 },
-    sad:       { smile: 0, frown: 0.5, browUp: 0.4, eyeSquint: 0.1, pupil: 0.8 },
-    surprised: { smile: 0, frown: 0, browUp: 0.6, eyeSquint: -0.2, pupil: 1.4 },
-    angry:     { smile: 0, frown: 0.3, browUp: -0.3, eyeSquint: 0.2, pupil: 0.7 },
-    neutral:   { smile: 0, frown: 0, browUp: 0, eyeSquint: 0, pupil: 1.0 },
-};
-
-let currentEmotion = { ...EMOTIONS.neutral };
-let emotionTarget = { ...EMOTIONS.neutral };
-let emotionTimeout = null;
-
-function setEmotion(name) {
-    emotionTarget = { ...(EMOTIONS[name] || EMOTIONS.neutral) };
-    updateEmotionBadge(name);
-    if (emotionTimeout) clearTimeout(emotionTimeout);
-}
-
-function updateEmotionFace(delta) {
-    const rate = 1 - Math.exp(-5 * delta);
-    for (const k in currentEmotion) {
-        currentEmotion[k] += (emotionTarget[k] - currentEmotion[k]) * rate;
+    // Subtle head tilt while talking (NO up-down nodding)
+    if (headBone) {
+        // Only very subtle side-tilt, no up/down nod
+        headBone.rotation.z = THREE.MathUtils.lerp(headBone.rotation.z, Math.sin(talkGesturePhase * 0.8) * 0.008, 0.03);
     }
-    mouthTarget.smile = Math.max(mouthTarget.smile, currentEmotion.smile * 0.5);
-    mouthTarget.frown = Math.max(mouthTarget.frown, currentEmotion.frown * 0.5);
-    leftBrow.position.y = 0.055 + currentEmotion.browUp * 0.01;
-    rightBrow.position.y = 0.055 + currentEmotion.browUp * 0.01;
-    leftBrow.rotation.z = -0.05 + currentEmotion.browUp * 0.1;
-    rightBrow.rotation.z = 0.05 - currentEmotion.browUp * 0.1;
-    pupilDilation = currentEmotion.pupil || 1;
-}
 
-function microExpressions(time) {
-    const smile = (Math.sin(time * 0.4) + 1) * 0.03;
-    mouthTarget.smile = Math.max(mouthTarget.smile, smile);
-    const brow = (Math.sin(time * 0.3 + 1.5) + 1) * 0.003;
-    leftBrow.position.y = Math.max(leftBrow.position.y, 0.055 + brow);
-    rightBrow.position.y = Math.max(rightBrow.position.y, 0.055 + brow);
+    // Shoulder movement
+    if (leftArmBone) {
+        leftArmBone.rotation.z = THREE.MathUtils.lerp(leftArmBone.rotation.z,
+            (leftArmBone._baseRotZ || 0) + Math.sin(talkGesturePhase * 1.0) * 0.04, 0.05);
+    }
+    if (rightArmBone) {
+        rightArmBone.rotation.z = THREE.MathUtils.lerp(rightArmBone.rotation.z,
+            (rightArmBone._baseRotZ || 0) + Math.sin(talkGesturePhase * 1.0 + 2) * 0.04, 0.05);
+    }
+
+    // Forearm gestures
+    if (leftForeArmBone) {
+        leftForeArmBone.rotation.x = THREE.MathUtils.lerp(leftForeArmBone.rotation.x,
+            Math.sin(talkGesturePhase * 1.3) * 0.06, 0.05);
+    }
+    if (rightForeArmBone) {
+        rightForeArmBone.rotation.x = THREE.MathUtils.lerp(rightForeArmBone.rotation.x,
+            Math.sin(talkGesturePhase * 1.3 + 2) * 0.06, 0.05);
+    }
+
+    // Body sway
+    if (spineBone) {
+        spineBone.rotation.y = THREE.MathUtils.lerp(spineBone.rotation.y,
+            Math.sin(talkGesturePhase * 0.7) * 0.012, 0.03);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SECTION 6 — Real-Time Lip Sync Engine (v2)
+// SECTION 6 — Lip Sync Engine
 // ═══════════════════════════════════════════════════════════════════════════
-// Two modes:
-//  A. Real-time: SpeechSynthesis 'boundary' events drive word-level visemes
-//  B. Timeline:  server phoneme data (fallback for no boundary events)
-//  C. Rhythmic:  basic fallback when neither is available
-
 let lipSyncAnimFrame = null;
 let isSpeaking = false;
 let currentPhonemes = null;
 
-// Client-side text → viseme lookup
 const CHAR_VISEME = {
     'th': 'viseme_TH', 'ch': 'viseme_CH', 'sh': 'viseme_CH',
     'ng': 'viseme_nn', 'wh': 'viseme_U', 'ph': 'viseme_FF',
@@ -684,7 +713,7 @@ const CHAR_VISEME = {
 function wordToVisemes(word) {
     const w = word.toLowerCase().replace(/[^a-z]/g, '');
     const result = [];
-    const BASE = 0.065;
+    const BASE = 0.075;  // longer hold per viseme for clarity
     for (let i = 0; i < w.length; i++) {
         const di = i < w.length - 1 ? w.substr(i, 2) : '';
         const vis = CHAR_VISEME[di] || CHAR_VISEME[w[i]];
@@ -692,8 +721,8 @@ function wordToVisemes(word) {
             const isVowel = 'aeiou'.includes(w[i]);
             result.push({
                 viseme: vis,
-                duration: isVowel ? BASE * 1.3 : BASE * 0.9,
-                intensity: isVowel ? 0.85 : 0.55,
+                duration: isVowel ? BASE * 1.5 : BASE * 0.9,
+                intensity: isVowel ? 1.0 : 0.75,  // boosted intensity
             });
             if (CHAR_VISEME[di]) i++;
         }
@@ -704,77 +733,117 @@ function wordToVisemes(word) {
 let wordVisemeQueue = [];
 let wordVisemeStart = 0;
 
-function tickRealtimeLipSync() {
+// Lip sync mode: 'none' | 'realtime' | 'timeline' | 'fallback'
+let lipSyncMode = 'none';
+let lipSyncStartTime = 0;
+
+// Called from the main animation loop — no separate rAF needed
+function tickLipSync() {
     if (!isSpeaking) return;
-    resetMouthTarget();
-    if (wordVisemeQueue.length > 0) {
-        const elapsed = (performance.now() - wordVisemeStart) / 1000;
-        let t = 0;
-        for (const v of wordVisemeQueue) {
-            if (elapsed >= t && elapsed < t + v.duration) {
-                // Bell-curve envelope within each phoneme
-                const progress = (elapsed - t) / v.duration;
-                const envelope = Math.sin(progress * Math.PI);
-                setMouthFromViseme(v.viseme, v.intensity * (0.4 + envelope * 0.6));
-                break;
+
+    if (lipSyncMode === 'realtime') {
+        // Boundary-event driven: play the current word's viseme queue
+        if (wordVisemeQueue.length > 0) {
+            const elapsed = (performance.now() - wordVisemeStart) / 1000;
+            let t = 0;
+            let matched = false;
+            for (let vi = 0; vi < wordVisemeQueue.length; vi++) {
+                const v = wordVisemeQueue[vi];
+                if (elapsed >= t && elapsed < t + v.duration) {
+                    const progress = (elapsed - t) / v.duration;
+                    const envelope = Math.sin(progress * Math.PI);
+                    applyViseme(v.viseme, v.intensity * (0.5 + envelope * 0.5));
+                    // Co-articulation: blend into next viseme
+                    if (vi + 1 < wordVisemeQueue.length && progress > 0.6) {
+                        const next = wordVisemeQueue[vi + 1];
+                        const coblend = (progress - 0.6) / 0.4;
+                        applyViseme(next.viseme, next.intensity * coblend * 0.4);
+                    }
+                    matched = true;
+                    break;
+                }
+                t += v.duration;
             }
-            t += v.duration;
+            if (elapsed > t) wordVisemeQueue = [];
         }
-        if (elapsed > t) wordVisemeQueue = [];
+
+    } else if (lipSyncMode === 'timeline') {
+        // Server phoneme timeline
+        const elapsed = (performance.now() - lipSyncStartTime) / 1000;
+
+        // Auto-stop when timeline completes (prevents lingering mouth pose)
+        if (currentPhonemes?.totalDuration && elapsed > currentPhonemes.totalDuration + 0.15) {
+            stopLipSync();
+            return;
+        }
+
+        if (currentPhonemes?.phonemes) {
+            for (let pi = 0; pi < currentPhonemes.phonemes.length; pi++) {
+                const ph = currentPhonemes.phonemes[pi];
+                if (elapsed >= ph.time && elapsed < ph.time + ph.duration) {
+                    const progress = (elapsed - ph.time) / ph.duration;
+                    const envelope = Math.sin(progress * Math.PI);
+                    applyViseme(ph.viseme, (ph.intensity || 1.0) * (0.5 + envelope * 0.5));
+                }
+                // Co-articulation into next phoneme
+                if (elapsed >= ph.time + ph.duration * 0.7 && elapsed < ph.time + ph.duration) {
+                    if (pi + 1 < currentPhonemes.phonemes.length) {
+                        const next = currentPhonemes.phonemes[pi + 1];
+                        const blend = (elapsed - (ph.time + ph.duration * 0.7)) / (ph.duration * 0.3);
+                        applyViseme(next.viseme, (next.intensity || 0.5) * blend * 0.35);
+                    }
+                }
+            }
+        }
+
+    } else if (lipSyncMode === 'fallback') {
+        // Cyclic vowel sequence fallback
+        const elapsed = (performance.now() - lipSyncStartTime) / 1000;
+        const cycle = elapsed * 5.0;
+        const syllable = Math.floor(cycle) % 5;
+        const progress = cycle - Math.floor(cycle);
+        const visemes = ['viseme_aa', 'viseme_E', 'viseme_O', 'viseme_I', 'viseme_U'];
+        applyViseme(visemes[syllable], Math.sin(progress * Math.PI) * 0.9);
+        // Add a subtle jaw component for ARKit
+        if (hasARKitMorphs) setMorph('jawOpen', Math.sin(progress * Math.PI) * 0.5);
     }
-    lipSyncAnimFrame = requestAnimationFrame(tickRealtimeLipSync);
 }
 
 function startLipSyncFromTimeline(phonemeData) {
     stopLipSync();
     isSpeaking = true;
     currentPhonemes = phonemeData;
+    lipSyncMode = 'timeline';
+    lipSyncStartTime = performance.now();
     talkGesturePhase = 0;
-    const startTime = performance.now();
-    function tick() {
-        if (!isSpeaking) return;
-        const elapsed = (performance.now() - startTime) / 1000;
-        resetMouthTarget();
-        if (currentPhonemes?.phonemes) {
-            for (const ph of currentPhonemes.phonemes) {
-                if (elapsed >= ph.time && elapsed < ph.time + ph.duration) {
-                    const progress = (elapsed - ph.time) / ph.duration;
-                    const envelope = Math.sin(progress * Math.PI);
-                    setMouthFromViseme(ph.viseme, (ph.intensity || 0.8) * (0.4 + envelope * 0.6));
-                }
-                // Co-articulation: blend the next viseme during the last 30%
-                if (elapsed >= ph.time + ph.duration * 0.7 && elapsed < ph.time + ph.duration) {
-                    const idx = currentPhonemes.phonemes.indexOf(ph) + 1;
-                    if (idx < currentPhonemes.phonemes.length) {
-                        const next = currentPhonemes.phonemes[idx];
-                        const blend = (elapsed - (ph.time + ph.duration * 0.7)) / (ph.duration * 0.3);
-                        setMouthFromViseme(next.viseme, (next.intensity || 0.5) * blend * 0.4);
-                    }
-                }
-            }
-        }
-        lipSyncAnimFrame = requestAnimationFrame(tick);
-    }
-    tick();
     showSpeakingUI();
 }
 
 function startRealtimeLipSync() {
     stopLipSync();
     isSpeaking = true;
+    lipSyncMode = 'realtime';
     talkGesturePhase = 0;
     wordVisemeQueue = [];
-    tickRealtimeLipSync();
     showSpeakingUI();
 }
 
 function stopLipSync() {
     isSpeaking = false;
+    lipSyncMode = 'none';
     if (lipSyncAnimFrame) { cancelAnimationFrame(lipSyncAnimFrame); lipSyncAnimFrame = null; }
-    resetMouthTarget();
     talkGesturePhase = 0;
     wordVisemeQueue = [];
     hideSpeakingUI();
+}
+
+function startLipSyncFallback() {
+    stopLipSync();
+    isSpeaking = true;
+    lipSyncMode = 'fallback';
+    lipSyncStartTime = performance.now();
+    talkGesturePhase = 0;
+    showSpeakingUI();
 }
 
 function showSpeakingUI() {
@@ -789,27 +858,6 @@ function hideSpeakingUI() {
     hideSubtitle();
 }
 
-function startLipSyncFallback() {
-    stopLipSync();
-    isSpeaking = true;
-    talkGesturePhase = 0;
-    const startTime = performance.now();
-    function tick() {
-        if (!isSpeaking) return;
-        const elapsed = (performance.now() - startTime) / 1000;
-        resetMouthTarget();
-        const cycle = elapsed * 5.5;
-        const syllable = Math.floor(cycle) % 5;
-        const progress = cycle - Math.floor(cycle);
-        const visemes = ['viseme_aa', 'viseme_E', 'viseme_O', 'viseme_I', 'viseme_U'];
-        setMouthFromViseme(visemes[syllable], Math.sin(progress * Math.PI) * 0.7);
-        lipSyncAnimFrame = requestAnimationFrame(tick);
-    }
-    tick();
-    showSpeakingUI();
-}
-
-// Waveform
 let waveformInterval = null;
 function animateWaveform() {
     stopWaveform();
@@ -837,32 +885,57 @@ function animate() {
     const delta = Math.min(glClock.getDelta(), 0.05);
     elapsedTime += delta;
 
-    updateMouthAnimation(delta);
-    updateEyeGaze(delta);
-    updateBlink(elapsedTime, delta);
-    animateIdleBody(elapsedTime);
-    if (isSpeaking) animateTalkingBody(elapsedTime, delta);
-    updateEmotionFace(delta);
-    if (!isSpeaking) microExpressions(elapsedTime);
+    if (avatarLoaded) {
+        // Reset targets each frame, then build up from ALL systems
+        resetMorphTargets();
 
-    const pos = pGeo.attributes.position.array;
+        // 1. Lip sync visemes (highest priority for mouth morphs)
+        tickLipSync();
+
+        // 2. Emotion morphs
+        updateEmotionMorphs(delta);
+
+        // 3. Micro expressions (idle only)
+        if (!isSpeaking) microExpressions(elapsedTime);
+
+        // 4. Eye gaze
+        updateEyeGaze(delta);
+
+        // 5. Blinking
+        updateBlink(elapsedTime, delta);
+
+        // 6. Body animation
+        animateIdleBody(elapsedTime);
+        if (isSpeaking) animateTalkingBody(elapsedTime, delta);
+
+        // 7. Apply all accumulated morph targets with smoothing
+        updateMorphTargets(delta);
+
+        // Update animation mixer
+        if (mixer) mixer.update(delta);
+    }
+
+    // Particles
+    const pp = pGeo.attributes.position.array;
     for (let i = 0; i < P_COUNT; i++) {
-        pos[i * 3 + 1] += Math.sin(elapsedTime * pSpd[i] + i) * 0.0004;
-        pos[i * 3] += Math.cos(elapsedTime * pSpd[i] * 0.7 + i * 0.3) * 0.0002;
+        pp[i * 3 + 1] += Math.sin(elapsedTime * pSpd[i] + i) * 0.0003;
+        pp[i * 3] += Math.cos(elapsedTime * pSpd[i] * 0.7 + i * 0.3) * 0.00015;
     }
     pGeo.attributes.position.needsUpdate = true;
 
-    camera.position.y = 1.58 + Math.sin(elapsedTime * 0.3) * 0.003;
+    glowRing.material.opacity = 0.06 + Math.sin(elapsedTime * 0.5) * 0.02;
+    camera.position.y += Math.sin(elapsedTime * 0.25) * 0.0001;
+
     controls.update();
     renderer.render(scene, camera);
 }
 animate();
 
 window.addEventListener('resize', () => {
-    const s = canvas.parentElement;
-    camera.aspect = s.clientWidth / s.clientHeight;
+    const d = getCanvasDimensions();
+    camera.aspect = d.width / d.height;
     camera.updateProjectionMatrix();
-    renderer.setSize(s.clientWidth, s.clientHeight);
+    renderer.setSize(d.width, d.height);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -875,20 +948,26 @@ let voices = [];
 function populateVoiceList() {
     voices = window.speechSynthesis.getVoices();
     voiceSelect.innerHTML = '';
+    // Prefer female voices to match the female avatar character
     const preferred = voices.filter(v =>
-        v.name.includes('Google UK English Male') ||
-        v.name.includes('David') ||
-        (v.name.includes('Male') && v.lang.startsWith('en'))
+        v.name.includes('Google UK English Female') ||
+        v.name.includes('Google US English') ||
+        v.name.includes('Microsoft Zira') ||
+        v.name.includes('Samantha') ||
+        v.name.includes('Karen') ||
+        v.name.includes('Victoria') ||
+        (v.name.includes('Female') && v.lang.startsWith('en'))
     );
     voices.sort((a, b) => {
         const ap = preferred.includes(a), bp = preferred.includes(b);
         return ap === bp ? 0 : ap ? -1 : 1;
     });
+    let selectedSet = false;
     voices.forEach(v => {
         const o = document.createElement('option');
         o.textContent = `${v.name} (${v.lang})`;
         o.value = v.name;
-        if (v.name.includes('Google UK English Male') || v.name.includes('Microsoft David')) o.selected = true;
+        if (!selectedSet && preferred.includes(v)) { o.selected = true; selectedSet = true; }
         voiceSelect.appendChild(o);
     });
 }
@@ -901,21 +980,28 @@ function speak(text, phonemeData) {
         window.speechSynthesis.cancel();
 
         const utt = new SpeechSynthesisUtterance(text);
-        utt.rate = 0.95;
-        utt.pitch = 0.9;
+        utt.rate = 0.92;
+        utt.pitch = 1.12;
         utt.volume = 1.0;
 
         const selectedVoice = voices.find(v => v.name === voiceSelect.value) || voices[0];
         if (selectedVoice) utt.voice = selectedVoice;
 
         showSubtitle(text);
-
-        // Real-time boundary-event lip sync (Chrome fires these per word)
         let usedBoundary = false;
+        let speechStarted = false;
 
+        // If server-provided phoneme timeline is available we IGNORE browser boundary
+        // events (they are unreliable across platforms) and use the timeline instead.
         utt.onboundary = (event) => {
+            if (phonemeData?.phonemes?.length) return; // prefer server timeline
             if (event.name === 'word') {
-                usedBoundary = true;
+                // Start lip sync on FIRST word boundary — this ensures
+                // lips don't move before the voice is actually audible
+                if (!usedBoundary) {
+                    usedBoundary = true;
+                    startRealtimeLipSync();
+                }
                 const charLen = event.charLength || (text.indexOf(' ', event.charIndex) - event.charIndex);
                 const word = text.substr(event.charIndex, Math.max(charLen, 1) || 8);
                 if (word && word.trim()) {
@@ -927,19 +1013,26 @@ function speak(text, phonemeData) {
 
         utt.onstart = () => {
             console.log('🔊 Speech started');
+            speechStarted = true;
+
+            // Prefer server phoneme timeline when available — start it exactly when audio starts
             if (phonemeData?.phonemes?.length > 0) {
-                startRealtimeLipSync();
-                // If no boundary events arrive within 500ms, fall back to timeline
-                setTimeout(() => {
-                    if (!usedBoundary && isSpeaking) {
-                        console.log('⚠️ No boundary events detected, using timeline lip sync');
-                        stopLipSync();
-                        startLipSyncFromTimeline(phonemeData);
-                    }
-                }, 500);
-            } else {
-                startLipSyncFallback();
+                startLipSyncFromTimeline(phonemeData);
+                usedBoundary = true;
+                return;
             }
+
+            // Otherwise wait for boundary events; set fallback if none arrive
+            setTimeout(() => {
+                if (!usedBoundary && speechStarted) {
+                    console.log('⚠️ No boundary events — falling back to timeline lip sync');
+                    if (phonemeData?.phonemes?.length > 0) {
+                        startLipSyncFromTimeline(phonemeData);
+                    } else {
+                        startLipSyncFallback();
+                    }
+                }
+            }, 400);
         };
 
         utt.onend = () => { console.log('🔇 Speech ended'); stopLipSync(); resolve(); };
@@ -949,7 +1042,6 @@ function speak(text, phonemeData) {
     });
 }
 
-// Subtitle system
 const subtitleOverlay = document.getElementById('subtitle-overlay');
 const subtitleText = document.getElementById('subtitle-text');
 function showSubtitle(text) {
@@ -1012,6 +1104,8 @@ const thinkingIndicator = document.getElementById('thinking-indicator');
 let isProcessing = false;
 const sessionId = 'session_' + Date.now();
 
+updateStatus('Online');
+
 async function sendMessage() {
     const message = chatInput.value.trim();
     if (!message || isProcessing) return;
@@ -1037,6 +1131,10 @@ async function sendMessage() {
         typingEl.remove();
         showThinking(false);
 
+        // Notify user if server is using demo / rate-limited responses
+        if (data.rateLimited) showNotification('Gemini API rate-limited — using demo responses', 'warning');
+        if (data.demo) showNotification('Gemini API key not set — running demo mode', 'warning');
+
         if (data.error) {
             addMessage('Sorry, I encountered an error. Please try again.', 'assistant');
             return;
@@ -1060,8 +1158,13 @@ async function sendMessage() {
 function addMessage(text, role) {
     const div = document.createElement('div');
     div.className = `message ${role}-message`;
-    const icon = role === 'user' ? '👤' : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a5 5 0 0 1 5 5v1a5 5 0 0 1-10 0V7a5 5 0 0 1 5-5z"/><path d="M2 20c0-3.87 3.13-7 7-7h6c3.87 0 7 3.13 7 7"/></svg>';
-    div.innerHTML = `<div class="message-avatar">${icon}</div><div class="message-content"><p>${escapeHtml(text)}</p></div>`;
+    const icon = role === 'user'
+        ? '👤'
+        : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a5 5 0 0 1 5 5v1a5 5 0 0 1-10 0V7a5 5 0 0 1 5-5z"/><path d="M2 20c0-3.87 3.13-7 7-7h6c3.87 0 7 3.13 7 7"/></svg>';
+    const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    div.innerHTML =
+        `<div class="message-avatar">${icon}</div>` +
+        `<div class="message-content"><p>${escapeHtml(text)}</p><span class="msg-time">${timeStr}</span></div>`;
     chatMessages.appendChild(div);
     chatMessages.scrollTop = chatMessages.scrollHeight;
     return div;
@@ -1070,7 +1173,11 @@ function addMessage(text, role) {
 function addTypingIndicator() {
     const div = document.createElement('div');
     div.className = 'message assistant-message';
-    div.innerHTML = `<div class="message-avatar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a5 5 0 0 1 5 5v1a5 5 0 0 1-10 0V7a5 5 0 0 1 5-5z"/><path d="M2 20c0-3.87 3.13-7 7-7h6c3.87 0 7 3.13 7 7"/></svg></div><div class="message-content"><div class="typing-indicator"><span></span><span></span><span></span></div></div>`;
+    div.innerHTML =
+        '<div class="message-avatar"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+        '<path d="M12 2a5 5 0 0 1 5 5v1a5 5 0 0 1-10 0V7a5 5 0 0 1 5-5z"/>' +
+        '<path d="M2 20c0-3.87 3.13-7 7-7h6c3.87 0 7 3.13 7 7"/></svg></div>' +
+        '<div class="message-content"><div class="typing-indicator"><span></span><span></span><span></span></div></div>';
     chatMessages.appendChild(div);
     chatMessages.scrollTop = chatMessages.scrollHeight;
     return div;
@@ -1078,7 +1185,6 @@ function addTypingIndicator() {
 
 function showThinking(show) {
     thinkingIndicator?.classList.toggle('active', show);
-    if (show) { leftBrow.position.y = 0.062; rightBrow.position.y = 0.062; }
 }
 
 function updateStatus(text) {
@@ -1087,6 +1193,7 @@ function updateStatus(text) {
 }
 
 function updateEmotionBadge(name) {
+    if (!emotionBadge) return;
     const emojis = { happy: '😊', sad: '😢', surprised: '😲', angry: '😠', neutral: '😐' };
     emotionBadge.classList.remove('emotion-happy', 'emotion-sad', 'emotion-surprised', 'emotion-angry');
     if (name !== 'neutral') emotionBadge.classList.add(`emotion-${name}`);
@@ -1103,5 +1210,188 @@ sendButton.addEventListener('click', sendMessage);
 chatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
 chatInput.focus();
 
-console.log('🚀 Nova AI Virtual Human (v4.0) initialized');
-console.log('   Real-time boundary lip sync • Tongue animation • Pupil dilation • Co-articulation blending');
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 11 — MediaPipe Face Tracking
+// ═══════════════════════════════════════════════════════════════════════════
+let faceTrackingEnabled = false;
+let videoElement = null;
+let faceMesh = null;
+let faceTrackingActive = false;
+
+function createVideoElement() {
+    if (videoElement) return videoElement;
+    videoElement = document.createElement('video');
+    videoElement.id = 'face-tracking-video';
+    videoElement.style.cssText = `position:fixed;bottom:20px;left:20px;width:180px;height:135px;
+        border-radius:12px;border:2px solid rgba(124,111,255,0.5);object-fit:cover;z-index:100;display:none;
+        box-shadow:0 4px 20px rgba(0,0,0,0.4);transform:scaleX(-1);`;
+    videoElement.autoplay = true;
+    videoElement.playsInline = true;
+    videoElement.muted = true;
+    document.body.appendChild(videoElement);
+    return videoElement;
+}
+
+async function loadFaceMesh() {
+    if (faceMesh) return faceMesh;
+    try {
+        const loadScript = (src) => new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = src; s.crossOrigin = 'anonymous';
+            s.onload = resolve; s.onerror = reject;
+            document.head.appendChild(s);
+        });
+        await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js');
+        await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js');
+        await new Promise(r => setTimeout(r, 300));
+        if (typeof FaceMesh === 'undefined') throw new Error('FaceMesh not loaded');
+        faceMesh = new FaceMesh({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}` });
+        faceMesh.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+        faceMesh.onResults(onFaceResults);
+        console.log('✅ MediaPipe Face Mesh loaded');
+        return faceMesh;
+    } catch (error) {
+        console.error('Failed to load MediaPipe:', error);
+        showNotification('Face tracking unavailable', 'warning');
+        return null;
+    }
+}
+
+function onFaceResults(results) {
+    if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
+        faceTrackGazeX = null; faceTrackGazeY = null;
+        faceTrackBlink = null; faceTrackSmile = null;
+        faceTrackMouthOpen = null; faceTrackBrowRaise = null;
+        return;
+    }
+    const lm = results.multiFaceLandmarks[0];
+
+    const lEyeOpen = Math.abs(lm[159].y - lm[145].y);
+    const rEyeOpen = Math.abs(lm[386].y - lm[374].y);
+    faceTrackBlink = THREE.MathUtils.clamp(1 - ((lEyeOpen + rEyeOpen) / 2 - 0.008) / 0.035, 0, 1);
+
+    faceTrackGazeX = (lm[4].x - 0.5) * -2.5;
+    faceTrackGazeY = (lm[4].y - 0.5) * -2;
+
+    const mouthOpenAmt = Math.abs(lm[13].y - lm[14].y);
+    faceTrackMouthOpen = THREE.MathUtils.clamp((mouthOpenAmt - 0.015) / 0.06, 0, 1);
+    if (faceTrackMouthOpen > 0.08 && !isSpeaking) {
+        if (hasOculusVisemes) setMorph('viseme_aa', faceTrackMouthOpen * 0.7);
+        else if (hasARKitMorphs) setMorph('jawOpen', faceTrackMouthOpen * 0.7);
+    }
+
+    const mouthWidth = Math.abs(lm[291].x - lm[61].x);
+    faceTrackSmile = THREE.MathUtils.clamp((mouthWidth - 0.14) / 0.1, 0, 1);
+    if (!isSpeaking) {
+        setMorph('mouthSmileLeft', faceTrackSmile * 0.6);
+        setMorph('mouthSmileRight', faceTrackSmile * 0.6);
+    }
+
+    const browAvgY = (lm[107].y + lm[336].y + lm[70].y + lm[300].y) / 4;
+    faceTrackBrowRaise = THREE.MathUtils.clamp((0.28 - browAvgY) / 0.06, -0.5, 1);
+    if (!isSpeaking) {
+        setMorph('browInnerUp', Math.max(0, faceTrackBrowRaise) * 0.5);
+        setMorph('browDownLeft', Math.max(0, -faceTrackBrowRaise) * 0.4);
+        setMorph('browDownRight', Math.max(0, -faceTrackBrowRaise) * 0.4);
+    }
+}
+
+async function startFaceTracking() {
+    if (faceTrackingActive) return;
+    try {
+        createVideoElement();
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' } });
+        videoElement.srcObject = stream;
+        videoElement.style.display = 'block';
+        await videoElement.play();
+        const fm = await loadFaceMesh();
+        if (!fm) { stopFaceTracking(); return; }
+        faceTrackingActive = true;
+        faceTrackingEnabled = true;
+        async function processFrame() {
+            if (!faceTrackingActive) return;
+            if (videoElement.readyState >= 2) {
+                try { await faceMesh.send({ image: videoElement }); } catch (e) { console.warn('Frame error:', e); }
+            }
+            requestAnimationFrame(processFrame);
+        }
+        processFrame();
+        showNotification('Face tracking enabled!', 'success');
+        updateFaceTrackButton(true);
+    } catch (error) {
+        console.error('Face tracking error:', error);
+        showNotification(error.name === 'NotAllowedError' ? 'Camera access denied' : 'Face tracking failed', 'error');
+        stopFaceTracking();
+    }
+}
+
+function stopFaceTracking() {
+    faceTrackingActive = false;
+    faceTrackingEnabled = false;
+    if (videoElement) {
+        const stream = videoElement.srcObject;
+        if (stream) stream.getTracks().forEach(t => t.stop());
+        videoElement.srcObject = null;
+        videoElement.style.display = 'none';
+    }
+    faceTrackGazeX = null; faceTrackGazeY = null;
+    faceTrackBlink = null; faceTrackSmile = null;
+    faceTrackMouthOpen = null; faceTrackBrowRaise = null;
+    updateFaceTrackButton(false);
+}
+
+function toggleFaceTracking() {
+    faceTrackingActive ? (stopFaceTracking(), showNotification('Face tracking off', 'info')) : startFaceTracking();
+}
+
+function updateFaceTrackButton(active) {
+    const btn = document.getElementById('face-track-button');
+    if (btn) {
+        btn.classList.toggle('active', active);
+        btn.title = active ? 'Disable Face Tracking' : 'Enable Face Tracking';
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SECTION 12 — UI Initialization
+// ═══════════════════════════════════════════════════════════════════════════
+(function initFaceTrackButton() {
+    const hc = document.querySelector('.header-controls');
+    if (!hc) return;
+    const btn = document.createElement('button');
+    btn.id = 'face-track-button';
+    btn.className = 'icon-button';
+    btn.title = 'Enable Face Tracking';
+    btn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="10" r="6"/>
+        <circle cx="9.5" cy="9" r="0.5" fill="currentColor"/>
+        <circle cx="14.5" cy="9" r="0.5" fill="currentColor"/>
+        <path d="M9.5 12.5a3 3 0 0 0 5 0"/>
+        <path d="M12 16v2"/><path d="M8 22h8"/>
+    </svg>`;
+    btn.style.cssText = `background:var(--bg-glass,rgba(16,16,36,0.55));border:1px solid var(--border-subtle,rgba(124,111,255,0.12));
+        color:var(--text-secondary,#a09bb8);padding:8px;border-radius:8px;cursor:pointer;transition:all 0.2s;
+        display:flex;align-items:center;justify-content:center;margin-right:8px;`;
+    btn.addEventListener('click', toggleFaceTracking);
+    btn.addEventListener('mouseenter', () => { if (!btn.classList.contains('active')) btn.style.background = 'rgba(124,111,255,0.2)'; });
+    btn.addEventListener('mouseleave', () => { if (!btn.classList.contains('active')) btn.style.background = 'var(--bg-glass,rgba(16,16,36,0.55))'; });
+    hc.insertBefore(btn, hc.firstChild);
+})();
+
+const injectedStyles = document.createElement('style');
+injectedStyles.textContent = `
+    #face-track-button.active {
+        background: rgba(124,111,255,0.35) !important;
+        border-color: rgba(124,111,255,0.6) !important;
+        color: #fff !important;
+        box-shadow: 0 0 12px rgba(124,111,255,0.3);
+    }
+    @keyframes notifSlide {
+        from { transform: translateX(100%); opacity: 0; }
+        to { transform: translateX(0); opacity: 1; }
+    }
+    #face-tracking-video { transition: opacity 0.3s ease; }
+`;
+document.head.appendChild(injectedStyles);
+
+console.log('🚀 Nova AI Virtual Human (v7.0) — GLB Avatar with Morph-Target Lip Sync');

@@ -3,14 +3,14 @@
  * 
  * Express server that provides:
  * 1. Static file serving for the frontend
- * 2. POST /api/chat - Gemini LLM chat + AI-powered emotion detection
+ * 2. POST /api/chat - Groq LLM chat + AI-powered emotion detection
  * 3. POST /api/tts-data - Enhanced phoneme timing data for lip sync
  */
 
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import Groq from 'groq-sdk';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
@@ -25,13 +25,11 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(join(__dirname, 'public')));
 
-// ─── Gemini LLM Setup ───────────────────────────────────────────────────────
+// ─── Groq LLM Setup ─────────────────────────────────────────────────────────
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY || '' });
 
-const chatModel = genAI.getGenerativeModel({
-    model: 'gemini-2.0-flash',
-    systemInstruction: `You are Nova, a warm, charismatic, and highly intelligent AI virtual human represented by a photo-realistic 3D human avatar in a browser.
+const SYSTEM_PROMPT = `You are Nova, a warm, charismatic, and highly intelligent AI virtual human represented by a photo-realistic 3D human avatar in a browser.
 
 PERSONALITY:
 - Speak naturally as if face-to-face — confident, warm, occasionally witty
@@ -53,14 +51,9 @@ CRITICAL FORMAT RULES:
 - Speak in clean, natural sentences only
 - No numbered lists or headers
 - Respond as if literally speaking out loud to someone standing in front of you
-- Keep responses conversational and flowing, not lecture-like`,
-});
+- Keep responses conversational and flowing, not lecture-like`;
 
-// Emotion detection model
-const emotionModel = genAI.getGenerativeModel({
-    model: 'gemini-2.0-flash',
-});
-
+// chatSessions stores per-session message history for multi-turn conversations
 const chatSessions = new Map();
 
 // ─── Enhanced Phoneme Engine ────────────────────────────────────────────────
@@ -199,7 +192,7 @@ function generatePhonemeData(text) {
 // ─── API Routes ─────────────────────────────────────────────────────────────
 
 /**
- * Retry wrapper for Gemini API calls with exponential backoff.
+ * Retry wrapper for Groq API calls with exponential backoff.
  */
 async function callWithRetry(fn, maxRetries = 3) {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -245,27 +238,37 @@ app.post('/api/chat', async (req, res) => {
             return res.status(400).json({ error: 'Message is required' });
         }
 
-        if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'your_gemini_api_key_here') {
+        if (!process.env.GROQ_API_KEY || process.env.GROQ_API_KEY === 'your_groq_api_key_here') {
             const demo = getDemoResponse();
             const phonemeData = generatePhonemeData(demo.response);
-            return res.json({ ...demo, sessionId, phonemes: phonemeData });
+            // Indicate demo mode so frontend can notify the user
+            return res.json({ ...demo, sessionId, phonemes: phonemeData, demo: true });
         }
 
-        // Get or create chat session
+        // Get or create message history for this session
         if (!chatSessions.has(sessionId)) {
-            chatSessions.set(sessionId, chatModel.startChat({ history: [] }));
+            chatSessions.set(sessionId, []);
         }
 
         let responseText;
         let emotion = 'neutral';
 
         try {
-            const chat = chatSessions.get(sessionId);
-            const result = await callWithRetry(() => chat.sendMessage(message));
-            responseText = result.response.text();
+            const history = chatSessions.get(sessionId);
+            history.push({ role: 'user', content: message });
+            const completion = await callWithRetry(() => groq.chat.completions.create({
+                messages: [
+                    { role: 'system', content: SYSTEM_PROMPT },
+                    ...history,
+                ],
+                model: 'llama-3.3-70b-versatile',
+                max_tokens: 1024,
+            }));
+            responseText = completion.choices[0].message.content;
+            history.push({ role: 'assistant', content: responseText });
         } catch (apiError) {
-            // If Gemini is rate-limited/down, use demo response
-            console.warn('Gemini API unavailable, using demo response:', apiError.message?.substring(0, 100));
+            // If Groq is rate-limited/down, use demo response
+            console.warn('Groq API unavailable, using demo response:', apiError.message?.substring(0, 100));
             const demo = getDemoResponse();
             const phonemeData = generatePhonemeData(demo.response);
             return res.json({ ...demo, sessionId, phonemes: phonemeData, rateLimited: true });
@@ -273,10 +276,15 @@ app.post('/api/chat', async (req, res) => {
 
         // AI-powered emotion detection (non-blocking, with timeout)
         try {
-            const emotionResult = await callWithRetry(() => emotionModel.generateContent(
-                `Analyze the emotional tone of this text and respond with EXACTLY ONE word from this list: happy, sad, surprised, angry, neutral.\n\nText: "${responseText}"\n\nRespond with only the emotion word, nothing else.`
-            ), 1);
-            const detectedEmotion = emotionResult.response.text().trim().toLowerCase();
+            const emotionResult = await callWithRetry(() => groq.chat.completions.create({
+                messages: [{
+                    role: 'user',
+                    content: `Analyze the emotional tone of this text and respond with EXACTLY ONE word from this list: happy, sad, surprised, angry, neutral.\n\nText: "${responseText}"\n\nRespond with only the emotion word, nothing else.`,
+                }],
+                model: 'llama-3.1-8b-instant',
+                max_tokens: 10,
+            }), 1);
+            const detectedEmotion = emotionResult.choices[0].message.content.trim().toLowerCase();
             if (['happy', 'sad', 'surprised', 'angry', 'neutral'].includes(detectedEmotion)) {
                 emotion = detectedEmotion;
             }
@@ -323,7 +331,7 @@ app.post('/api/tts-data', async (req, res) => {
 app.listen(PORT, () => {
     console.log(`\n🧑 Nova AI Virtual Human Server (v3.0)`);
     console.log(`   Running at: http://localhost:${PORT}`);
-    console.log(`   API Key:    ${process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'your_gemini_api_key_here' ? '✅ Configured' : '⚠️  Not set (demo mode)'}`);
-    console.log(`   Features:   Full-Body Avatar • Audio Lip Sync • Body Gestures • Gemini Emotions • Subtitles`);
+    console.log(`   API Key:    ${process.env.GROQ_API_KEY && process.env.GROQ_API_KEY !== 'your_groq_api_key_here' ? '✅ Configured' : '⚠️  Not set (demo mode)'}`);
+    console.log(`   Features:   Full-Body Avatar • Audio Lip Sync • Body Gestures • Groq AI • Subtitles`);
     console.log(`   Press Ctrl+C to stop\n`);
 });
