@@ -74,7 +74,6 @@ Saved/
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
 .Python
 pip-log.txt
 pip-delete-this-directory.txt
@@ -94,7 +93,6 @@ pip-delete-this-directory.txt
 *.rar
 
 # Environment
-.env
 .env.local
 .env.*.local
 secrets.yml
